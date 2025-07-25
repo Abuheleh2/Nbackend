@@ -1,0 +1,21 @@
+{
+  "builds": [
+    {
+      "src": "api/*.py",  # This tells Vercel to build all .py files in the api/ directory as serverless functions
+      "use": "@vercel/python",
+      "config": { "maxLambdaSize": "15mb", "runtime": "python3.9" }
+    }
+    // If you still need to serve static files from your Flask app, you might need another build entry for src/main.py
+    // but for API calls, this is the primary way.
+  ],
+  "routes": [
+    {
+      "src": "/api/generate-copy", # This is the exact path your frontend will call
+      "dest": "/api/generate_copy.py" # This maps it to your new serverless function file
+    },
+    {
+      "src": "/(.*)", # This is a fallback for other routes, if you have them
+      "dest": "src/main.py" # Directs other traffic to your Flask app
+    }
+  ]
+}
