@@ -1,121 +1,85 @@
 import os
-import sys
-from flask import Flask, send_from_directory, jsonify
+from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
+from flask_sqlalchemy import SQLAlchemy
+import openai
 
-# Add the parent directory to the path to allow imports
-current_dir = os.path.dirname(os.path.abspath(__file__))
-parent_dir = os.path.dirname(current_dir)
-sys.path.insert(0, parent_dir)
+# ─── CONFIGURATION ─────────────────────────────────────────────────────────────
 
-from src.models.user import db
-from src.routes.user import user_bp
-from src.routes.generate_copy import generate_copy_bp
+app = Flask(__name__, static_folder="static")
+CORS(app)
 
-# Initialize Flask app
-app = Flask(__name__, static_folder=os.path.join(os.path.dirname(__file__), 'static'))
-app.config['SECRET_KEY'] = '9IpDjXzQ9EgYNMh9pbEkmEk3c-PrhqudOrCGdRIgygA'
+# Use an environment variable OPENAI_API_KEY for your key
+openai.api_key = os.getenv("OPENAI_API_KEY", "")
 
-# Enable CORS for all routes
-CORS(app, origins="*")
+# Simple SQLite DB for user data or logging if you need it
+app.config["SQLALCHEMY_DATABASE_URI"] = os.getenv("DATABASE_URL", "sqlite:///neonadsai.db")
+app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+db = SQLAlchemy(app)
 
-# =============================================================
-# DATABASE CONFIGURATION - CORRECTED FORMAT
-# =============================================================
-# IMPORTANT: Database URL must be a single continuous string
-# Use SQLite for deployment to avoid PostgreSQL connection issues
-import os
-if os.getenv('DATABASE_URL'):
-    app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL')
-else:
-    app.config['SQLALCHEMY_DATABASE_URI'] = "sqlite:///neonadsai.db"
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+# ─── ROUTES ────────────────────────────────────────────────────────────────────
 
-# Initialize database
-db.init_app(app)
+@app.route("/api/generate-copy", methods=["POST"])
+def generate_copy():
+    data = request.get_json() or {}
+    prompt_text = data.get("prompt", "").strip()
+    n = data.get("num_variations", 3)
 
-# =============================================================
-# DATABASE INITIALIZATION WITH ERROR HANDLING
-# =============================================================
-def initialize_database():
-    """Safe database initialization with error handling and logging"""
+    if not prompt_text:
+        return jsonify(error="`prompt` is required."), 400
+
+    # Build a single prompt for GPT-3.5
+    system_msg = {
+        "role": "system",
+        "content": (
+            "أنت خبير في كتابة الإعلانات باللغة العربية والإنجليزية. "
+            "أريدك أن تخرج لي {{n}} نسخٍ إعلانية احترافية قصيرة لكل منهما."
+        ).replace("{{n}}", str(n))
+    }
+    user_msg = {
+        "role": "user",
+        "content": (
+            "استخدم المعلومات التالية لكتابة إعلانين (عربي وإنجليزي) لكل نسخة:\n\n"
+            f"{prompt_text}\n\n"
+            "لكل نسخة، قدّم:\n"
+            "- عنوان (Headline)\n"
+            "- نص وجيز (Body)\n"
+            "- نداء للعمل (Call to Action)\n"
+            "- الفئة المستهدفة (Target Audience)\n\n"
+            "رجاءً اعدّد النسخ وعدّد الحقول."
+        )
+    }
+
     try:
-        with app.app_context():
-            print("Attempting to connect to database...")
-            print(f"Using database URL: {app.config['SQLALCHEMY_DATABASE_URI']}")
-            
-            # Test connection first
-            connection = db.engine.connect()
-            connection.close()
-            print("Database connection successful!")
-            
-            # Create tables
-            db.create_all()
-            print("Database tables created successfully")
-            
-        return True
+        resp = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
+            messages=[system_msg, user_msg],
+            temperature=0.8,
+            n=1
+        )
+        answer = resp.choices[0].message.content.strip()
+        # Split by the marker "🚀" or numbered list
+        variations = [v.strip() for v in answer.split("🚀") if v.strip()]
+        return jsonify(variations=variations)
     except Exception as e:
-        print(f"!!! DATABASE INITIALIZATION FAILED !!!")
-        print(f"Error: {str(e)}")
-        print("Please verify your database configuration")
-        return False
+        return jsonify(error=str(e)), 500
 
-# Initialize database tables on startup
-with app.app_context():
-    try:
-        db.create_all()
-        print("Database tables created successfully")
-    except Exception as e:
-        print(f"Database initialization error: {e}")
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify(status="ok"), 200
 
-# =============================================================
-# BLUEPRINT REGISTRATION
-# =============================================================
-app.register_blueprint(user_bp, url_prefix='/api')
-app.register_blueprint(generate_copy_bp, url_prefix='/api')
-
-# =============================================================
-# HEALTH CHECK ENDPOINT
-# =============================================================
-@app.route('/health')
-def health_check():
-    """Endpoint to verify database connectivity"""
-    try:
-        # Simple database check
-        db.session.execute(db.text('SELECT 1'))
-        return jsonify({
-            'status': 'healthy',
-            'database': 'connected',
-            'app': 'neonadsai-backend'
-        }), 200
-    except Exception as e:
-        return jsonify({
-            'status': 'unhealthy',
-            'database': 'connection failed',
-            'error': str(e)
-        }), 500
-
-# =============================================================
-# STATIC FILE SERVING (REACT APP)
-# =============================================================
-@app.route('/', defaults={'path': ''})
-@app.route('/<path:path>')
+@app.route("/", defaults={"path": ""})
+@app.route("/<path:path>")
 def serve(path):
-    static_folder_path = app.static_folder
-    if static_folder_path is None:
-        return "Static folder not configured", 404
+    # Serve React build (put your built files into ./static)
+    if path and os.path.exists(os.path.join(app.static_folder, path)):
+        return send_from_directory(app.static_folder, path)
+    return send_from_directory(app.static_folder, "index.html")
 
-    if path != "" and os.path.exists(os.path.join(static_folder_path, path)):
-        return send_from_directory(static_folder_path, path)
-    else:
-        index_path = os.path.join(static_folder_path, 'index.html')
-        if os.path.exists(index_path):
-            return send_from_directory(static_folder_path, 'index.html')
-        else:
-            return "index.html not found", 404
+# ─── STARTUP ──────────────────────────────────────────────────────────────────
 
-# =============================================================
-# APPLICATION STARTUP
-# =============================================================
-# Export the app for deployment
-__all__ = ['app']
+if __name__ == "__main__":
+    # Create tables if needed
+    db.create_all()
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)), debug=True)
+
